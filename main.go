@@ -1,21 +1,17 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
+	getapi "mytelegrambot/pcg/getApi"
+	"mytelegrambot/pcg/structs"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
 )
-
-type users struct {
-	name_user     string
-	lastname_user string
-	status        bool
-}
 
 func main() {
 
@@ -37,7 +33,8 @@ func main() {
 	u.Timeout = 60
 
 	updates, err := bot.GetUpdatesChan(u)
-	usersToWatch := make(map[int]users)
+	usersToWatch := make(map[int]structs.Users)
+	usersToWatchMutex := sync.RWMutex{}
 
 	for update := range updates {
 		if update.Message == nil {
@@ -65,16 +62,17 @@ func main() {
 					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Некорректный ID. Попробуй еще раз.")
 					bot.Send(msg)
 				} else {
-					vkUserInfo, err := getVKUserInfo(userID, vkTocken)
+					vkUserInfo, err := getapi.GetVKUserInfo(userID, vkTocken)
 					if err == nil && vkUserInfo.Response != nil && len(vkUserInfo.Response) > 0 {
-						userToWatch := users{
-							name_user:     vkUserInfo.Response[0].FirstName,
-							lastname_user: vkUserInfo.Response[0].LastName,
-							status:        true,
+						userToWatch := structs.Users{
+							Name_user:     vkUserInfo.Response[0].FirstName,
+							Lastname_user: vkUserInfo.Response[0].LastName,
+							Status:        true,
+							ChatID:        update.Message.Chat.ID,
 						}
 						usersToWatch[userID] = userToWatch
 					}
-					msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Я буду следить за пользователем с ID %d\nИмя пользователя: %s\nФамилия пользователя: %s", userID, usersToWatch[userID].name_user, usersToWatch[userID].lastname_user))
+					msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Я буду следить за пользователем с ID %d\nИмя пользователя: %s\nФамилия пользователя: %s", userID, usersToWatch[userID].Name_user, usersToWatch[userID].Lastname_user))
 					bot.Send(msg)
 					waitingForAdd = false
 
@@ -110,36 +108,40 @@ func main() {
 			}
 		}
 
+		go func() {
+			for {
+				usersToCheck := make(map[int]structs.Users)
+
+				usersToWatchMutex.RLock() // Захватываем мьютекс для чтения мапы
+				for id, user := range usersToWatch {
+					usersToCheck[id] = user
+				}
+				usersToWatchMutex.RUnlock() // Освобождаем мьютекс
+
+				for id, user := range usersToCheck {
+					go func(userID int, user structs.Users) {
+						vkUserInfo, err := getapi.GetVKUserInfo(userID, vkTocken)
+						if err != nil {
+							log.Printf("Error getting user info for ID %d: %v", userID, err)
+							return
+						}
+
+						if vkUserInfo.Response != nil && len(vkUserInfo.Response) > 0 && vkUserInfo.Response[0].Online == 1 {
+							usersToWatchMutex.Lock() // Захватываем мьютекс для изменения мапы
+							delete(usersToWatch, userID)
+							usersToWatchMutex.Unlock() // Освобождаем мьютекс
+
+							msg := tgbotapi.NewMessage(user.ChatID, fmt.Sprintf("Пользователь с ID %d появился в сети!", userID))
+							bot.Send(msg)
+						}
+					}(id, user)
+				}
+
+				time.Sleep(time.Minute) // Пауза между проверками
+			}
+		}()
+
 	}
-}
-
-func getVKUserInfo(userID int, vkTocken string) (*VKUserInfoResponse, error) {
-
-	url := fmt.Sprintf("https://api.vk.com/method/users.get?user_ids=%d&&fields=online&access_token=%s&v=5.131", userID, vkTocken)
-	response, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-
-	var vkResponse VKUserInfoResponse
-	err = json.NewDecoder(response.Body).Decode(&vkResponse)
-	if err != nil {
-		return nil, err
-	}
-
-	return &vkResponse, nil
-}
-
-type VKUserInfoResponse struct {
-	Response []VKUser `json:"response"`
-}
-
-type VKUser struct {
-	ID        int    `json:"id"`
-	Online    int    `json:"online"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
 }
 
 func valid(str string) bool {
