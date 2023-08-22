@@ -42,7 +42,7 @@ func main() {
 		}
 
 		if update.Message.Text == "/start" {
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Бот запущен!\n Команда /add ждет ID для добавления в список слежки\n Команда /del ждет ID для удаления из списка слежки")
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Бот запущен!\n Команда /add ждет ID для добавления в список слежки\n Команда /del ждет ID для удаления из списка слежки\n Команда /list отобразит всех, за кем мы следим")
 			bot.Send(msg)
 		}
 
@@ -69,6 +69,7 @@ func main() {
 							Lastname_user: vkUserInfo.Response[0].LastName,
 							Status:        true,
 							ChatID:        update.Message.Chat.ID,
+							UserID:        userID,
 						}
 						usersToWatch[userID] = userToWatch
 					}
@@ -97,14 +98,31 @@ func main() {
 					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Некорректный ID. Попробуй еще раз.")
 					bot.Send(msg)
 				} else {
+
+					msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Я больше не буду следить за пользователем %s %s", usersToWatch[userID].Name_user, usersToWatch[userID].Lastname_user))
+					bot.Send(msg)
 					// Удаляем пользователя из мапы
 					delete(usersToWatch, userID)
 
-					msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Я больше не буду следить за пользователем с ID %d", userID))
-					bot.Send(msg)
-
 					waitingForDel = false // Завершаем режим ожидания ID
 				}
+			}
+		}
+
+		if update.Message.Text == "/list" {
+			usersToWatchMutex.RLock() // Захватываем мьютекс для чтения мапы
+			var userList string
+			for _, user := range usersToWatch {
+				userList += fmt.Sprintf("ID: %d, Имя: %s, Фамилия: %s\n", user.UserID, user.Name_user, user.Lastname_user)
+			}
+			usersToWatchMutex.RUnlock() // Освобождаем мьютекс
+
+			if userList != "" {
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Слежу за следующими пользователями:\n"+userList)
+				bot.Send(msg)
+			} else {
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "В данный момент нет пользователей, за которыми ведется слежка.")
+				bot.Send(msg)
 			}
 		}
 
@@ -128,11 +146,12 @@ func main() {
 
 						if vkUserInfo.Response != nil && len(vkUserInfo.Response) > 0 && vkUserInfo.Response[0].Online == 1 {
 							usersToWatchMutex.Lock() // Захватываем мьютекс для изменения мапы
-							delete(usersToWatch, userID)
+
 							usersToWatchMutex.Unlock() // Освобождаем мьютекс
 
-							msg := tgbotapi.NewMessage(user.ChatID, fmt.Sprintf("Пользователь с ID %d появился в сети!", userID))
+							msg := tgbotapi.NewMessage(user.ChatID, fmt.Sprintf("Пользователь %s %s появился в сети!", usersToWatch[userID].Name_user, usersToWatch[userID].Lastname_user))
 							bot.Send(msg)
+							delete(usersToWatch, userID)
 						}
 					}(id, user)
 				}
@@ -145,7 +164,7 @@ func main() {
 }
 
 func valid(str string) bool {
-	if str == "/del" || str == "/add" || str == "/start" {
+	if str == "/del" || str == "/add" || str == "/start" || str == "/list" {
 		return false
 	}
 	return true

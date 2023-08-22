@@ -5,6 +5,7 @@ type Users struct {
 	Lastname_user string
 	Status        bool
 	ChatID        int64
+	UserID        int
 }
 
 type VKUserInfoResponse struct {
