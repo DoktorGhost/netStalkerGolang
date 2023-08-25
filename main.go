@@ -33,7 +33,9 @@ func main() {
 	u.Timeout = 60
 
 	updates, err := bot.GetUpdatesChan(u)
-	usersToWatch := make(map[int]structs.Users)
+
+	usersToWatchMap := make(map[int]map[int]structs.VKUser)
+
 	usersToWatchMutex := sync.RWMutex{}
 
 	for update := range updates {
@@ -42,7 +44,9 @@ func main() {
 		}
 
 		if update.Message.Text == "/start" {
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Бот запущен!\n Команда /add ждет ID для добавления в список слежки\n Команда /del ждет ID для удаления из списка слежки\n Команда /list отобразит всех, за кем мы следим")
+			user := update.Message.From
+			firstName := user.FirstName
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Привет, %s!\n Бот запущен!\n Команда /add ждет ID для добавления в список слежки\n Команда /del ждет ID для удаления из списка слежки\n Команда /list отобразит всех, за кем мы следим", firstName))
 			bot.Send(msg)
 		}
 
@@ -56,24 +60,29 @@ func main() {
 		}
 
 		if waitingForAdd {
+			user := update.Message.From
+			userID := user.ID
+			if usersToWatchMap[userID] == nil {
+				usersToWatchMap[userID] = make(map[int]structs.VKUser)
+			}
 			if valid(update.Message.Text) {
-				userID, err := strconv.Atoi(strings.TrimSpace(update.Message.Text))
+				vkUserID, err := strconv.Atoi(strings.TrimSpace(update.Message.Text))
 				if err != nil {
 					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Некорректный ID. Попробуй еще раз.")
 					bot.Send(msg)
 				} else {
-					vkUserInfo, err := getapi.GetVKUserInfo(userID, vkTocken)
+					vkUserInfo, err := getapi.GetVKUserInfo(vkUserID, vkTocken)
 					if err == nil && vkUserInfo.Response != nil && len(vkUserInfo.Response) > 0 {
-						userToWatch := structs.Users{
-							Name_user:     vkUserInfo.Response[0].FirstName,
-							Lastname_user: vkUserInfo.Response[0].LastName,
-							Status:        true,
-							ChatID:        update.Message.Chat.ID,
-							UserID:        userID,
+						userToWatch := structs.VKUser{
+							FirstName: vkUserInfo.Response[0].FirstName,
+							LastName:  vkUserInfo.Response[0].LastName,
+							ID:        vkUserID,
 						}
-						usersToWatch[userID] = userToWatch
+						usersToWatchMutex.Lock()
+						usersToWatchMap[userID][vkUserID] = userToWatch
+						usersToWatchMutex.Unlock()
 					}
-					msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Я буду следить за пользователем с ID %d\nИмя пользователя: %s\nФамилия пользователя: %s", userID, usersToWatch[userID].Name_user, usersToWatch[userID].Lastname_user))
+					msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Я буду следить за пользователем с ID %d\nИмя пользователя: %s\nФамилия пользователя: %s", vkUserID, usersToWatchMap[userID][vkUserID].FirstName, usersToWatchMap[userID][vkUserID].LastName))
 					bot.Send(msg)
 					waitingForAdd = false
 
@@ -92,28 +101,44 @@ func main() {
 		}
 
 		if waitingForDel {
+			user := update.Message.From
+			userID := user.ID
+			if usersToWatchMap[userID] == nil {
+				usersToWatchMap[userID] = make(map[int]structs.VKUser)
+			}
 			if valid(update.Message.Text) {
-				userID, err := strconv.Atoi(strings.TrimSpace(update.Message.Text))
+				userIDVk, err := strconv.Atoi(strings.TrimSpace(update.Message.Text))
 				if err != nil {
 					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Некорректный ID. Попробуй еще раз.")
 					bot.Send(msg)
 				} else {
+					if _, ok := usersToWatchMap[userID][userIDVk]; ok {
+						msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Я больше не буду следить за пользователем %s %s", usersToWatchMap[userID][userIDVk].FirstName, usersToWatchMap[userID][userIDVk].LastName))
+						bot.Send(msg)
+						// Удаляем пользователя из мапы
+						usersToWatchMutex.Lock()
+						delete(usersToWatchMap[userID], userIDVk)
+						waitingForDel = false
+						usersToWatchMutex.Unlock()
+					} else {
+						msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Я и не следил за пользователем с ID %d", userIDVk))
+						bot.Send(msg)
+					}
 
-					msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Я больше не буду следить за пользователем %s %s", usersToWatch[userID].Name_user, usersToWatch[userID].Lastname_user))
-					bot.Send(msg)
-					// Удаляем пользователя из мапы
-					delete(usersToWatch, userID)
-
-					waitingForDel = false // Завершаем режим ожидания ID
 				}
 			}
 		}
 
 		if update.Message.Text == "/list" {
+			user := update.Message.From
+			userID := user.ID
 			usersToWatchMutex.RLock() // Захватываем мьютекс для чтения мапы
+			if usersToWatchMap[userID] == nil {
+				usersToWatchMap[userID] = make(map[int]structs.VKUser)
+			}
 			var userList string
-			for _, user := range usersToWatch {
-				userList += fmt.Sprintf("ID: %d, Имя: %s, Фамилия: %s\n", user.UserID, user.Name_user, user.Lastname_user)
+			for _, user := range usersToWatchMap[userID] {
+				userList += fmt.Sprintf("ID: %d, Имя: %s, Фамилия: %s\n", user.ID, user.FirstName, user.LastName)
 			}
 			usersToWatchMutex.RUnlock() // Освобождаем мьютекс
 
@@ -126,39 +151,39 @@ func main() {
 			}
 		}
 
-		go func() {
+		go func(update tgbotapi.Update) {
 			for {
-				usersToCheck := make(map[int]structs.Users)
+				usersToCheck := make(map[int]structs.VKUser)
 
 				usersToWatchMutex.RLock() // Захватываем мьютекс для чтения мапы
-				for id, user := range usersToWatch {
+				user := update.Message.From
+				userID := user.ID
+				for id, user := range usersToWatchMap[userID] {
 					usersToCheck[id] = user
 				}
 				usersToWatchMutex.RUnlock() // Освобождаем мьютекс
 
 				for id, user := range usersToCheck {
-					go func(userID int, user structs.Users) {
-						vkUserInfo, err := getapi.GetVKUserInfo(userID, vkTocken)
+					go func(userIDVk int, user structs.VKUser) {
+						vkUserInfo, err := getapi.GetVKUserInfo(userIDVk, vkTocken)
 						if err != nil {
-							log.Printf("Error getting user info for ID %d: %v", userID, err)
+							log.Printf("Error getting user info for ID %d: %v", userIDVk, err)
 							return
 						}
 
 						if vkUserInfo.Response != nil && len(vkUserInfo.Response) > 0 && vkUserInfo.Response[0].Online == 1 {
-							usersToWatchMutex.Lock() // Захватываем мьютекс для изменения мапы
-
-							usersToWatchMutex.Unlock() // Освобождаем мьютекс
-
-							msg := tgbotapi.NewMessage(user.ChatID, fmt.Sprintf("Пользователь %s %s появился в сети!", usersToWatch[userID].Name_user, usersToWatch[userID].Lastname_user))
+							msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Пользователь %s %s появился в сети!", usersToWatchMap[userID][userIDVk].FirstName, usersToWatchMap[userID][userIDVk].LastName))
 							bot.Send(msg)
-							delete(usersToWatch, userID)
+							usersToWatchMutex.RLock()
+							delete(usersToWatchMap[userID], userIDVk)
+							usersToWatchMutex.RUnlock() // Освобождаем мьютекс
 						}
 					}(id, user)
 				}
 
 				time.Sleep(time.Minute) // Пауза между проверками
 			}
-		}()
+		}(update)
 
 	}
 }
